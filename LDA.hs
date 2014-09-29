@@ -10,7 +10,7 @@ Online Latent Dirichlet Allocation.
 module LDA where
 
 import Data.Matrix
-import qualified Data.Vector as DV (Vector, toList, length, fromList) 
+import qualified Data.Vector as DV (Vector, fromList) 
 import qualified Data.IntMap as IM
 import Control.Monad.State
 
@@ -87,74 +87,54 @@ type Gamma    = Matrix Double
 
 -- ================= MODEL TRAINING ================= 
 
--- Update a given model using the given batch
+-- Update a given model using the given batch.
 update :: Model -> Batch -> RandomModel Model
-update m batch = do
-  m' <- eStep batch
-  _  <- put m'
-  let tau0   = tau $ hyperParams m
-  let count0 = updateCount m
-  let kappa0 = kappa $ hyperParams m
-  let rho'      = rhot tau0 count0 kappa0
-  let lambda'   = updateLambda m (sstats m') (d m')
-  let eLogBeta' = dirichletExpectation lambda'
-  return  Model {
-            k = k m,
-            w = w m,
-            d = d m,
-            updateCount = updateCount m + 1,
-            gamma       = gamma m',
-            eLogBeta    = eLogBeta',
-            expELogBeta = mexp eLogBeta',
-            lambda      = lambda',
-            vocab       = vocab m,
-            sstats      = sstats m',
-            hyperParams = HyperParams {
-              alpha = alpha $ hyperParams m,
-              eta   = eta   $ hyperParams m,
-              rho   = rho',
-              kappa = kappa $ hyperParams m,
-              tau   = tau   $ hyperParams m
-              }
-          }
+update _ batch = do
+  eStep batch
+  updateLambda $ length $ docs batch
+  updateBeta
+  updateRho
+  incrModel
+  get
 
 -- Lambda update from the paper.
-updateLambda :: Model -> SStats -> Int -> Lambda
-updateLambda m ss batchSize = elementwise (+) scaleLambda0 scaleSS
-  where lambda0 = lambda m 
-        r = rho $ hyperParams m
-        e = eta $ hyperParams m 
-        nd = fromIntegral $ d m 
-        bs = fromIntegral batchSize
-        scaleLambda0 = scaleMatrix (1.0 - r) lambda0
-        scaleSS      = scaleMatrix r $ madd e (scaleMatrix (nd / bs) ss)
-
--- TODO
--- Expectation step
-eStep :: Batch -> RandomModel Model
-eStep batch = do
+updateLambda :: Int -> RandomModel ()
+updateLambda batchSize = do
   m <- get
-  (gamma', sstats') <- eStepOuter batch
-  let sstats'' = elementwise (*) sstats' (expELogBeta m)
-  return  Model {
-            k = k m,
-            w = w m,
-            d = d m,
-            updateCount = updateCount m,
-            gamma       = gamma',
-            eLogBeta    = eLogBeta m,
-            expELogBeta = expELogBeta m,
-            lambda      = lambda m,
-            vocab       = vocab m,
-            sstats      = sstats'',
-            hyperParams = HyperParams {
-              alpha = alpha $ hyperParams m,
-              eta   = eta $ hyperParams m,
-              rho   = rho $ hyperParams m,
-              kappa = kappa $ hyperParams m,
-              tau   = tau $ hyperParams m
-              }
-          }
+  let lambda0 = lambda m 
+  let r = rho $ hyperParams m
+  let e = eta $ hyperParams m 
+  let nd = fromIntegral $ d m 
+  let bs = fromIntegral batchSize
+  let scaleLambda0 = scaleMatrix (1.0 - r) lambda0
+  let scaleSS      = scaleMatrix r $ madd e (scaleMatrix (nd / bs) (sstats m))
+  let lambda'      = elementwise (+) scaleLambda0 scaleSS
+  put $ m { lambda = lambda' }
+
+updateBeta :: RandomModel ()
+updateBeta = do
+  m <- get
+  let elb' = dirichletExpectation $ lambda m
+  put $ m { eLogBeta = elb', expELogBeta = mexp elb' }
+
+updateRho :: RandomModel ()
+updateRho = do
+  m <- get
+  let rho' = rhot (tau $ hyperParams m) (updateCount m) (kappa $ hyperParams m)
+  put $ m { hyperParams = (hyperParams m) { rho = rho' }}
+
+incrModel :: RandomModel ()
+incrModel = do
+  m <- get
+  put $ m { updateCount = updateCount m + 1 }
+
+-- Expectation step. Updates gamma and sstats.
+eStep :: Batch -> RandomModel ()
+eStep batch = do
+  m       <- get
+  (g, ss) <- eStepOuter batch
+  let ss' =  elementwise (*) ss (expELogBeta m)
+  put $ m { gamma = g, sstats = ss' }
 
 -- In the e-step double loop, we're ultimately computing values for
 --      gamma
@@ -166,53 +146,58 @@ eStepOuter batch = do
   let eltheta  = dirichletExpectation gamma0
   let eeltheta = mexp eltheta
   let sstats0  = zeroDouble (nrows (lambda m)) (ncols (lambda m))
-  let alph     = alpha $ hyperParams m  
-  let beta     = expELogBeta m
-  return $ foldl (eStepDocIter alph eeltheta beta) (gamma0, sstats0) (docs batch)
+  foldM (eStepDocIter eeltheta) (gamma0, sstats0) (docs batch)
 
 -- Perform e-step update for a single document in a batch.
-eStepDocIter :: Double -> Matrix Double -> Matrix Double -> (Gamma, SStats) -> (Int, Document) -> (Gamma, SStats)
-eStepDocIter alph expELogTheta expeLogBeta (gamm, ss) (i, doc) = 
+-- * et expELogTheta
+eStepDocIter :: Matrix Double -> (Gamma, SStats) -> (Int, Document) -> 
+                RandomModel (Gamma, SStats)
+eStepDocIter et (g, ss) (i, doc) = do
+  m <- get
+  let alph = alpha $ hyperParams m
   let ids = IM.keys $ wCts doc
-      cts = DV.fromList $ map fromIntegral $ intMapVals $ wCts doc 
-      gammad        = getRow i gamm
-      expElogthetad = getRow i expELogTheta
-      expElogbetad  = selectCols ids expeLogBeta
-      phinorm   = updatePhinorm expElogthetad expElogbetad
-      newgammad = innerIter (100::Int) gammad alph expElogthetad cts phinorm expElogbetad
-      newsstats = updateSStats ss ids expElogthetad cts phinorm
-  in  (updateRow i gamm newgammad, newsstats)   
+  let cts = DV.fromList $ map fromIntegral $ intMapVals $ wCts doc 
+  let gammad  = getRow i g
+  let etd     = getRow i et
+  let ebd     = selectCols ids $ expELogBeta m
+  let phinorm = updatePhinorm etd ebd
+  let gammad' = innerIter 100 gammad alph etd cts phinorm ebd
+  let ss'     = updateSStats ss ids etd cts phinorm
+  return (updateRow i g gammad', ss')   
 
-innerIter :: Int -> DV.Vector Double -> Double -> DV.Vector Double -> DV.Vector Double ->  DV.Vector Double -> Matrix Double -> DV.Vector Double
-innerIter n g a e c p b = 
-  if n <= 0 
-  then g
-  else innerIter (n-1) (updateGamma g a e c p b) a e c (updatePhinorm e b) b
+-- * n; g gammad; a alpha; e expElogthetad; c cts; p phinorm; b expElogbetad
+innerIter :: Int -> DV.Vector Double -> Double -> DV.Vector Double -> 
+             DV.Vector Double -> DV.Vector Double -> Matrix Double -> 
+             DV.Vector Double
+innerIter n g a e c p b = if n <= 0 then g 
+  else innerIter (n-1) (updateGamma a e c p b) a e c (updatePhinorm e b) b
 
--- Note that since RVar is the inner monad, we lift the RVar computation into
--- the StateT monad.
+-- sstats[:, ids] += n.outer(expElogthetad.T, cts/phinorm)
+updateSStats :: SStats -> [Int] -> DV.Vector Double -> DV.Vector Double ->  
+                DV.Vector Double -> SStats
+updateSStats ss ids elthetad c p = updateCols ids1 dot ss
+  where tmat  = vecMat elthetad
+        ids1  = map (+1) ids
+        cDivP = elementwise (/) (vecMat c) (vecMat p)
+        dot   = multStd2 (transpose tmat) cDivP
+
+updateGamma :: Double -> DV.Vector Double -> 
+               DV.Vector Double ->  DV.Vector Double -> Matrix Double -> 
+               DV.Vector Double
+updateGamma a e c p b = toVec $ madd a eMultDot
+  where emat = vecMat e
+        dot  = multStd2 cDivP (transpose b)
+        eMultDot = elementwise (*) emat dot
+        cDivP    = elementwise (/) (vecMat c) (vecMat p)
+        toVec    = getRow 1
+
+updatePhinorm :: DV.Vector Double -> Matrix Double -> DV.Vector Double
+updatePhinorm e m = getRow 1 $ multStd2 (vecMat e) m
+
 randomGammaMatrixM :: Int -> Int -> RandomModel (Matrix Double)
 randomGammaMatrixM r c = do
   xs <- lift $ replicateM (r*c) $ Data.Random.sample gammaGen
   return $ fromList r c xs
-
--- sstats[:, ids] += n.outer(expElogthetad.T, cts/phinorm)
-updateSStats :: SStats -> [Int] -> DV.Vector Double -> DV.Vector Double ->  DV.Vector Double -> SStats
-updateSStats ss ids elthetad c p = updateCols ids1 (multStd2 (transpose tmat) (elementwise (/) cmat pmat)) ss
-  where cmat = fromList 1 (DV.length c) $ DV.toList c
-        pmat = fromList 1 (DV.length p) $ DV.toList p
-        tmat = fromList 1 (DV.length elthetad) $ DV.toList elthetad
-        ids1 = map (+1) ids
-
-updateGamma :: DV.Vector Double -> Double -> DV.Vector Double -> DV.Vector Double ->  DV.Vector Double -> Matrix Double -> DV.Vector Double
-updateGamma _ a e c p b = getRow 1 $ madd a $ elementwise (*) emat $ multStd2 (elementwise (/) cmat pmat) (transpose b)
-  where cmat = fromList 1 (DV.length c) $ DV.toList c
-        pmat = fromList 1 (DV.length p) $ DV.toList p
-        emat = fromList 1 (DV.length e) $ DV.toList e
-
-updatePhinorm :: DV.Vector Double -> Matrix Double -> DV.Vector Double
-updatePhinorm e m = getRow 1 $ multStd2 emat m
-  where emat = fromList 1 (DV.length e) $ DV.toList e
 
 -- ========= DATA LOADING and DATA FORMATTING =======
 
@@ -220,14 +205,15 @@ updatePhinorm e m = getRow 1 $ multStd2 emat m
 docToWordCounts :: Document -> WordCounts
 docToWordCounts = undefined
 
--- print the topics for a model
+-- TODO print the topics for a model
 printTopics :: Model -> [String]
 printTopics m = [show (updateCount m), show (lambda m)]
 
--- load the vocabulary file
+-- TODO load the vocabulary file
 loadVocabulary :: String -> [String]
 loadVocabulary = undefined
 
+-- TODO
 docListFromFile :: String -> [Document]
 docListFromFile = undefined
 

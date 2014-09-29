@@ -2,7 +2,7 @@
 module MathUtils where
 
 import Data.Matrix
-import qualified Data.Vector as DV (Vector, toList) 
+import qualified Data.Vector as DV (Vector, toList, length) 
 import qualified Data.IntMap as IM
 import Data.List (sort, (\\))
 import Control.Monad.State
@@ -10,13 +10,11 @@ import Numeric.Digamma
 
 import Data.Random
 
+-- ================= MATRICES ==================== 
 
--- ================= MATHEMATICS ==================== 
-
-negateMatrix :: State (Matrix Int) (Matrix Int)
-negateMatrix = do
-  curr <- get
-  return $ scaleMatrix (-1) curr
+-- Convert a vector to a 1 x n matrix.
+vecMat :: DV.Vector a -> Matrix a
+vecMat v = fromList 1 (DV.length v) $ DV.toList v
 
 -- Add a scalar to every element of a matrix.
 madd :: Double -> Matrix Double -> Matrix Double
@@ -80,6 +78,8 @@ repeatCol col n = horizN initial initial (n - 1)
         horizN :: Matrix a -> Matrix a -> Int -> Matrix a
         horizN x _ 0 = x
         horizN x y m = horizN (x <|> y) y (m - 1)
+
+-- ================= MATH / PROB. ==================== 
 
 -- How much to weight the information from a mini-batch.
 -- p_t = (t_0 + t)^{-k}
