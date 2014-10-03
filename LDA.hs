@@ -5,13 +5,13 @@ Sean Welleck
 Online Latent Dirichlet Allocation.
 -}
 
-{-# LANGUAGE FlexibleContexts #-}
-
 module LDA where
 
 import Data.Matrix
 import qualified Data.Vector as DV (Vector, fromList) 
 import qualified Data.IntMap as IM
+import qualified Data.Map as Map
+import Data.Char (isAlphaNum)
 import Control.Monad.State
 
 import qualified Data.Random
@@ -61,9 +61,10 @@ data HyperParams = HyperParams {
 
 -- A monadic model that can keep state and have random variables.
 type RandomModel a = StateT Model Data.Random.RVar a
-
 -- A mapping from wordID -> word
 type Vocabulary = IM.IntMap String
+-- A mapping from word   -> wordID
+type Dictionary = Map.Map String Int
 -- A mapping from wordID -> wordCount
 type WordCounts = IM.IntMap Int
 
@@ -73,11 +74,13 @@ type WordCounts = IM.IntMap Int
 data Document = Document {
   ws   :: [String],
   wCts :: WordCounts
-}
+} deriving (Show)
 
 data Batch = Batch {
-  docs    :: [(Int, Document)]
+  docs :: [(Int, Document)]
 }
+
+type Filename = String
 
 -- Aliases for matrices.
 type Lambda   = Matrix Double
@@ -201,21 +204,47 @@ randomGammaMatrixM r c = do
 
 -- ========= DATA LOADING and DATA FORMATTING =======
 
--- TODO
-docToWordCounts :: Document -> WordCounts
-docToWordCounts = undefined
+countWords :: Dictionary -> [String] -> WordCounts
+countWords dict = foldr (\s m -> IM.insertWith (+) (dict Map.! s) 1 m) IM.empty
 
 -- TODO print the topics for a model
 printTopics :: Model -> [String]
 printTopics m = [show (updateCount m), show (lambda m)]
 
--- TODO load the vocabulary file
-loadVocabulary :: String -> [String]
-loadVocabulary = undefined
+-- Produce a vocabulary from the given file.
+loadVocabulary :: Filename -> IO Vocabulary
+loadVocabulary filename = do
+  ls <- readWholeFile filename
+  return $ IM.fromList $ zip [0..] ls
 
--- TODO
-docListFromFile :: String -> [Document]
-docListFromFile = undefined
+-- Produce a dictionary from the given file.
+loadDictionary :: Filename -> IO Dictionary
+loadDictionary filename = do
+  ls <- readWholeFile filename
+  return $ Map.fromList $ zip ls [0..]
+
+readWholeFile :: Filename -> IO [String]
+readWholeFile f = do
+  s <- readFile f
+  return $ lines s
+
+splitLine :: String -> [String]
+splitLine = map (filter isAlphaNum) . words
+
+-- Read a file, creating a document from each line.
+-- We need the Vocabulary to retrieve the wordIDs.
+docListFromFile :: Filename -> Dictionary -> IO [Document]
+docListFromFile f dict = do
+  ls <- readWholeFile f
+  return $ map (
+    (\line -> Document { ws = line, wCts = countWords dict line}) . splitLine) ls
+
+loadInput :: Filename -> Filename -> IO ([Document], Vocabulary)
+loadInput dataFile dictFile = do
+  dict <- loadDictionary dictFile
+  voc  <- loadVocabulary dictFile
+  ds   <- docListFromFile dataFile dict
+  return (ds, voc)
 
 -- TODO
 makeBatches :: [Document] -> Vocabulary -> [Batch]
@@ -265,8 +294,9 @@ initModel lambda0 =
 
 main :: IO ()
 main = do
-  lambda0 <- randomGammaMatrix 10 16
+  lambda0    <- randomGammaMatrix 10 16
+  (ds, voc)  <- loadInput "data/small.txt" "data/vocab.txt"
   let model0  = initModel lambda0
-  let batches = makeBatches sampleDocs vocabulary
+  let batches = makeBatches ds voc
   finalModel <- Data.Random.runRVar (evalStateT (foldM update model0 batches) model0) Data.Random.StdRandom
   print $ printTopics finalModel
