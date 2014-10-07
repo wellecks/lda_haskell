@@ -8,12 +8,13 @@ Online Latent Dirichlet Allocation.
 module LDA where
 
 import Data.Matrix
-import qualified Data.Vector as DV (Vector, fromList) 
+import qualified Data.Vector as DV (Vector, fromList, map) 
 import qualified Data.IntMap as IM
 import qualified Data.Map as Map
+import Data.List.Split (chunksOf)
 import Data.Char (isAlphaNum)
-import Control.Monad.State
-
+import Control.Monad.State.Strict
+import System.IO
 import qualified Data.Random
 
 import MathUtils
@@ -195,7 +196,7 @@ updateGamma a e c p b = toVec $ madd a eMultDot
         toVec    = getRow 1
 
 updatePhinorm :: DV.Vector Double -> Matrix Double -> DV.Vector Double
-updatePhinorm e m = getRow 1 $ multStd2 (vecMat e) m
+updatePhinorm e m = DV.map (+1e50) $ getRow 1 $ multStd2 (vecMat e) m
 
 randomGammaMatrixM :: Int -> Int -> RandomModel (Matrix Double)
 randomGammaMatrixM r c = do
@@ -207,7 +208,7 @@ randomGammaMatrixM r c = do
 countWords :: Dictionary -> [String] -> WordCounts
 countWords dict = foldr (\s m -> IM.insertWith (+) (dict Map.! s) 1 m) IM.empty
 
--- TODO print the topics for a model
+-- Print the topics for a model
 printTopics :: Model -> [String]
 printTopics m = [show (updateCount m), show (lambda m)]
 
@@ -228,6 +229,11 @@ readWholeFile f = do
   s <- readFile f
   return $ lines s
 
+readLazily :: Filename -> IO [String]
+readLazily f = do
+  inHandle <- openFile f ReadMode
+  liftM lines $ hGetContents inHandle
+
 splitLine :: String -> [String]
 splitLine = map (filter isAlphaNum) . words
 
@@ -236,20 +242,25 @@ splitLine = map (filter isAlphaNum) . words
 docListFromFile :: Filename -> Dictionary -> IO [Document]
 docListFromFile f dict = do
   ls <- readWholeFile f
+  let filtered = map (rmNonDict dict) ls
   return $ map (
-    (\line -> Document { ws = line, wCts = countWords dict line}) . splitLine) ls
+    (\line -> Document { ws = line, wCts = countWords dict line}) . splitLine) filtered
+
+rmNonDict :: Dictionary -> String -> String
+rmNonDict dict l= unwords $ filter (`Map.member` dict) (splitLine l)
 
 loadInput :: Filename -> Filename -> IO ([Document], Vocabulary)
 loadInput dataFile dictFile = do
   dict <- loadDictionary dictFile
   voc  <- loadVocabulary dictFile
   ds   <- docListFromFile dataFile dict
-  return (ds, voc)
+  let nonEmpty = filter (not . null . ws) ds
+  return (nonEmpty, voc)
 
--- TODO
-makeBatches :: [Document] -> Vocabulary -> [Batch]
-makeBatches ds _ = [Batch { docs = dtuples }]
-  where dtuples = zip (take (length ds) (iterate (+1) 1)) ds
+makeBatches :: Int -> [Document] -> [Batch]
+makeBatches batchSize ds = 
+  map (\c -> Batch { docs = dtuples c }) $ chunksOf batchSize ds
+  where dtuples = zip [1..]
 
 sampleDocs :: [Document]
 sampleDocs = [
@@ -267,12 +278,8 @@ vocabulary = IM.fromList [(0, "the"), (1, "tree"), (2, "runs"), (3, "quickly"),
 -- ============== MAIN EXECUTION ====================
 
 -- create a base initial model
-initModel :: Lambda -> Model
-initModel lambda0 = 
-  let k' = 10
-      w' = 16
-      d' = 4 in
-  Model {
+initModel :: Int -> Int -> Int -> Lambda -> Model
+initModel k' w' d' lambda0 = Model {
     k            = k',
     w            = w',
     d            = d',
@@ -294,9 +301,15 @@ initModel lambda0 =
 
 main :: IO ()
 main = do
-  lambda0    <- randomGammaMatrix 10 16
-  (ds, voc)  <- loadInput "data/small.txt" "data/vocab.txt"
-  let model0  = initModel lambda0
-  let batches = makeBatches ds voc
+  let k' = 10
+  (ds, voc)  <- loadInput "data/nytimes_tweets.txt" "data/dictnostops.txt"
+  print $ length ds
+  let b' = 10
+  let d' = length ds
+  let w' = IM.size voc
+  lambda0    <- randomGammaMatrix k' w'
+  let model0  = initModel k' w' d' lambda0
+  let batches = makeBatches b' (take 10 ds)
   finalModel <- Data.Random.runRVar (evalStateT (foldM update model0 batches) model0) Data.Random.StdRandom
   print $ printTopics finalModel
+
