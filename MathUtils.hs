@@ -2,7 +2,7 @@
 module MathUtils where
 
 import Data.Matrix
-import qualified Data.Vector as DV (Vector, toList, length) 
+import qualified Data.Vector as DV (Vector, toList, length, foldr, fromList, zip) 
 import qualified Data.IntMap as IM
 import Data.List (sort, (\\))
 import Control.Monad.State
@@ -55,17 +55,19 @@ updateCol um (umInd, mInd) m = condense $ swapCols $ m <|> um
         swapCols = switchCols mInd (ncols m + umInd)
 
 -- Mimics numpy matrix[:, idx], where idx is a list of indices.
-selectCols :: [Int] -> Matrix a -> Matrix a
+selectCols :: (Fractional a) => [Int] -> Matrix a -> Matrix a
 selectCols idx m = foldr removeCol m $ [1 .. ncols m] \\ sort idx
 
 -- Mimics numpy matrix[:, ~idx], where idx is a list of indices.
-filterCols :: [Int] -> Matrix a -> Matrix a
+filterCols :: (Fractional a) => [Int] -> Matrix a -> Matrix a
 filterCols idx m = foldr removeCol m $ sort idx
 
-removeCol :: Int -> Matrix a -> Matrix a
-removeCol n m = sub1 <|> sub2
-  where sub1 = submatrix 1 (nrows m) 1 (n-1) m
-        sub2 = submatrix 1 (nrows m) (n+1) (ncols m) m
+removeCol :: (Fractional a) => Int -> Matrix a -> Matrix a
+removeCol n m = m --fromList (nrows m) (ncols m - 1) $ DV.foldr (\(x, i) acc -> if i /= n && (n - (i `mod` (ncols m))/= 0) then x:acc else acc) [] $ DV.zip (getMatrixAsVector m) $ DV.fromList [1..(ncols m * nrows m)]
+
+-- minorMatrix (nrows m + 2) n $ setSize 0.0 (nrows m + 1) (ncols m) m
+  -- where sub1 = submatrix 1 (nrows m) 1 (n-1) m
+  --       sub2 = submatrix 1 (nrows m) (n+1) (ncols m) m
 
 -- Subtract a column vector from each column.
 subFromCol :: Num a => [a] -> Matrix a -> Matrix a

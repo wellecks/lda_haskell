@@ -95,16 +95,17 @@ type Gamma    = Matrix Double
 update :: Model -> Batch -> RandomModel Model
 update _ batch = do
   eStep batch
-  updateLambda $ length $ docs batch
-  updateBeta
-  updateRho
-  incrModel
-  get
+  m' <- get
+  let m2 = updateLambda m' $ length $ docs batch
+  let m3 = updateBeta m2
+  let m4 = updateRho m3
+  let m5 = incrModel m4
+  return m5
 
 -- Lambda update from the paper.
-updateLambda :: Int -> RandomModel ()
-updateLambda batchSize = do
-  m <- get
+updateLambda :: Model -> Int -> Model
+updateLambda m batchSize = do
+  --m <- get
   let lambda0 = lambda m 
   let r = rho $ hyperParams m
   let e = eta $ hyperParams m 
@@ -113,24 +114,24 @@ updateLambda batchSize = do
   let scaleLambda0 = scaleMatrix (1.0 - r) lambda0
   let scaleSS      = scaleMatrix r $ madd e (scaleMatrix (nd / bs) (sstats m))
   let lambda'      = elementwise (+) scaleLambda0 scaleSS
-  put $ m { lambda = lambda' }
+  m { lambda = lambda' }
 
-updateBeta :: RandomModel ()
-updateBeta = do
-  m <- get
+updateBeta :: Model -> Model --RandomModel ()
+updateBeta m = do
+  -- m <- get
   let elb' = dirichletExpectation $ lambda m
-  put $ m { eLogBeta = elb', expELogBeta = mexp elb' }
+  m { eLogBeta = elb', expELogBeta = mexp elb' }
 
-updateRho :: RandomModel ()
-updateRho = do
-  m <- get
+updateRho :: Model -> Model -- RandomModel ()
+updateRho m = do
+  --m <- get
   let rho' = rhot (tau $ hyperParams m) (updateCount m) (kappa $ hyperParams m)
-  put $ m { hyperParams = (hyperParams m) { rho = rho' }}
+  m { hyperParams = (hyperParams m) { rho = rho' }}
 
-incrModel :: RandomModel ()
-incrModel = do
-  m <- get
-  put $ m { updateCount = updateCount m + 1 }
+incrModel :: Model -> Model -- RandomModel ()
+incrModel m = do
+  --m <- get
+  m { updateCount = updateCount m + 1 }
 
 -- Expectation step. Updates gamma and sstats.
 eStep :: Batch -> RandomModel ()
@@ -162,7 +163,7 @@ eStepDocIter et (g, ss) (i, doc) = do
   let ids = IM.keys $ wCts doc
   let cts = DV.fromList $ map fromIntegral $ intMapVals $ wCts doc 
   let gammad  = getRow i g
-  let etd     = getRow i et
+  let etd     = rowVector $ getRow i et
   let ebd     = selectCols ids $ expELogBeta m
   let phinorm = updatePhinorm etd ebd
   let gammad' = innerIter 100 gammad alph etd cts phinorm ebd
@@ -170,33 +171,33 @@ eStepDocIter et (g, ss) (i, doc) = do
   return (updateRow i g gammad', ss')   
 
 -- * n; g gammad; a alpha; e expElogthetad; c cts; p phinorm; b expElogbetad
-innerIter :: Int -> DV.Vector Double -> Double -> DV.Vector Double -> 
-             DV.Vector Double -> DV.Vector Double -> Matrix Double -> 
+innerIter :: Int -> DV.Vector Double -> Double -> Matrix Double -> 
+             DV.Vector Double -> Matrix Double -> Matrix Double -> 
              DV.Vector Double
 innerIter n g a e c p b = if n <= 0 then g 
   else innerIter (n-1) (updateGamma a e c p b) a e c (updatePhinorm e b) b
 
 -- sstats[:, ids] += n.outer(expElogthetad.T, cts/phinorm)
-updateSStats :: SStats -> [Int] -> DV.Vector Double -> DV.Vector Double ->  
-                DV.Vector Double -> SStats
+updateSStats :: SStats -> [Int] -> Matrix Double -> DV.Vector Double ->  
+                Matrix Double -> SStats
 updateSStats ss ids elthetad c p = updateCols ids1 dot ss
-  where tmat  = vecMat elthetad
+  where tmat  = elthetad
         ids1  = map (+1) ids
-        cDivP = elementwise (/) (vecMat c) (vecMat p)
+        cDivP = elementwise (/) (vecMat c) p
         dot   = multStd2 (transpose tmat) cDivP
 
-updateGamma :: Double -> DV.Vector Double -> 
-               DV.Vector Double ->  DV.Vector Double -> Matrix Double -> 
+updateGamma :: Double -> Matrix Double -> 
+               DV.Vector Double ->  Matrix Double -> Matrix Double -> 
                DV.Vector Double
 updateGamma a e c p b = toVec $ madd a eMultDot
-  where emat = vecMat e
+  where emat = e
         dot  = multStd2 cDivP (transpose b)
         eMultDot = elementwise (*) emat dot
-        cDivP    = elementwise (/) (vecMat c) (vecMat p)
+        cDivP    = elementwise (/) (vecMat c) p
         toVec    = getRow 1
 
-updatePhinorm :: DV.Vector Double -> Matrix Double -> DV.Vector Double
-updatePhinorm e m = DV.map (+1e50) $ getRow 1 $ multStd2 (vecMat e) m
+updatePhinorm :: Matrix Double -> Matrix Double -> Matrix Double
+updatePhinorm e m = madd 1e-50  $ multStrassenMixed e m
 
 randomGammaMatrixM :: Int -> Int -> RandomModel (Matrix Double)
 randomGammaMatrixM r c = do
@@ -304,12 +305,12 @@ main = do
   let k' = 10
   (ds, voc)  <- loadInput "data/nytimes_tweets.txt" "data/dictnostops.txt"
   print $ length ds
-  let b' = 10
+  let b' = 50
   let d' = length ds
   let w' = IM.size voc
   lambda0    <- randomGammaMatrix k' w'
-  let model0  = initModel k' w' d' lambda0
-  let batches = makeBatches b' (take 10 ds)
+  let model0  = initModel k' w' b' lambda0
+  let batches = makeBatches b' ds
   finalModel <- Data.Random.runRVar (evalStateT (foldM update model0 batches) model0) Data.Random.StdRandom
   print $ printTopics finalModel
 
